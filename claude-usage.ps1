@@ -30,9 +30,12 @@ $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbe
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
 # behind a company proxy (407 "proxy authentication required"), sign in to it as the Windows user, like the browser does
 [Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials
+$SystemProxy = [Net.WebRequest]::DefaultWebProxy
+$DirectRoute = New-Object Net.WebProxy   # no proxy at all
 $RefreshSeconds = if ($Demo) { 6 } else { 60 }            # 30 s got "429 Too Many Requests" from the server now and then
 $MaxRefreshSeconds = 600                                  # slowest pace while the server keeps saying "too many requests"
 $TooManyRequestsStatus = 429
+$ProxyAuthStatus = 407
 # minutes without a prompt, Claude activity or usage change before each stage of winding down
 $BoredAfterMinutes = if ($Demo) { 0.1 } else { 1 }        # toys come out
 $DrowsyAfterMinutes = if ($Demo) { 0.3 } else { 3 }       # yawning, droopy eyes
@@ -438,6 +441,18 @@ function Get-DemoUsage {
     }
 }
 
+# Some company proxies refuse scripts (407, or they drop the connection) while a direct connection works, others are the only way out:
+# when the current route is refused, try the other one once; whichever works stays in use.
+function Invoke-UsageRequest($headers) {
+    try { return Invoke-RestMethod -Uri $UsageUrl -TimeoutSec 5 -Headers $headers }
+    catch {
+        $response = $_.Exception.Response
+        if ($response -and [int]$response.StatusCode -ne $ProxyAuthStatus) { throw }
+    }
+    [Net.WebRequest]::DefaultWebProxy = if ([Net.WebRequest]::DefaultWebProxy -eq $DirectRoute) { $SystemProxy } else { $DirectRoute }
+    Invoke-RestMethod -Uri $UsageUrl -TimeoutSec 5 -Headers $headers
+}
+
 function Get-Usage {
     if ($Demo) { return Get-DemoUsage }
     $script:oauth = (Get-Content $CredentialsPath -Raw -ErrorAction Stop | ConvertFrom-Json).claudeAiOauth
@@ -448,7 +463,7 @@ function Get-Usage {
     $expiresAt = $script:oauth.expiresAt
     if ($expiresAt -and [datetimeoffset]::UtcNow.ToUnixTimeMilliseconds() -gt $expiresAt) { throw $TokenExpiredError }
     # ponytail: synchronous call pauses the animation while it runs (5s worst case); move to a runspace if that annoys
-    Invoke-RestMethod -Uri $UsageUrl -TimeoutSec 5 -Headers @{ Authorization = "Bearer $token"; 'anthropic-beta' = 'oauth-2025-04-20' }
+    Invoke-UsageRequest @{ Authorization = "Bearer $token"; 'anthropic-beta' = 'oauth-2025-04-20' }
 }
 
 # A limit moved since the last refresh: wake everybody up and have somebody announce it.

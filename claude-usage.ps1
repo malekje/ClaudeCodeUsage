@@ -242,6 +242,7 @@ $ClaudeProgramPatterns = @(
     (Join-Path $env:LOCALAPPDATA 'Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\*\*\claude.exe')
 )
 $RenewTimeoutSeconds = 90
+$LoginArguments = 'auth login'
 
 # what the working character shows for each Claude Code tool; Kind picks its animation
 $ToolTasks = @{
@@ -508,17 +509,21 @@ function Update-Usage {
         if (-not $Demo) { $usage | ConvertTo-Json -Depth 5 | Set-Content $LastUsagePath -Encoding utf8 }
         $status.Text = 'Updated ' + (Get-Date -Format 'HH:mm:ss') + $(if ($Demo) { '  (demo numbers)' })
         $renewButton.Visibility = 'Collapsed'
+        $script:autoRenewTried = $false
         if ($script:refreshDelay -ne $RefreshSeconds) { Set-RefreshDelay $RefreshSeconds }
     } catch {
         $response = $_.Exception.Response
         if ($response -and [int]$response.StatusCode -eq $TooManyRequestsStatus) { Suspend-Refresh $response; return }
         if ($script:renewProcess) { return }   # the renew button is already working on it
+        if (-not $Demo -and -not (Test-Path $CredentialsPath)) { Start-Login; return }
         # ponytail: the token is never refreshed here (that would rotate it and could log Claude out); Claude Code renews it when used
         $rejected = $_.Exception.Message -eq $TokenExpiredError -or ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401)
         $expiresAt = $script:oauth.expiresAt
         $validUntil = if ($expiresAt) { [datetimeoffset]::FromUnixTimeMilliseconds($expiresAt).LocalDateTime.ToString('g') } else { 'unknown' }
-        $status.Text = if ($rejected) { "Login token expired ($validUntil). Click Renew login." } else { "Error: $($_.Exception.Message) $($_.ErrorDetails.Message)" }
+        $status.Text = if ($rejected) { "Login token expired ($validUntil). Renewing it..." } else { "Error: $($_.Exception.Message) $($_.ErrorDetails.Message)" }
         $renewButton.Visibility = if ($rejected -and -not $script:renewProcess) { 'Visible' } else { 'Collapsed' }
+        # renew by itself once per expiry; the button stays as the retry if that fails
+        if ($rejected -and -not $script:autoRenewTried) { $script:autoRenewTried = $true; Start-Renew }
     }
 }
 
@@ -530,6 +535,20 @@ function Find-ClaudeProgram {
     if ($onPath) { return $onPath.Source }
     # several Desktop versions can sit side by side: take the newest
     Get-ChildItem $ClaudeProgramPatterns -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+
+# Claude Desktop keeps its login to itself, so a Desktop-only PC has no credentials file yet:
+# open one Claude Code sign-in window (once per run) that creates it; the next refresh then shows the stats.
+function Start-Login {
+    if ($script:loginOpened) { return }
+    $claudeProgram = Find-ClaudeProgram
+    if (-not $claudeProgram) {
+        $status.Text = 'Claude Code was not found on this PC. Install Claude Desktop or Claude Code, then restart this widget.'
+        return
+    }
+    $script:loginOpened = $true
+    Start-Process $claudeProgram -ArgumentList $LoginArguments
+    $status.Text = 'First run: sign in to Claude in the window that just opened. Your stats show up here right after.'
 }
 
 function Start-Renew {
@@ -1535,6 +1554,8 @@ $script:failedTool = $null
 $script:forecast = $null
 $script:renewProcess = $null
 $script:renewStarted = $null
+$script:autoRenewTried = $false
+$script:loginOpened = $false
 $script:held = $null           # what the mouse is carrying: a character or the ball
 $script:todayChanged = $false
 Restore-Today

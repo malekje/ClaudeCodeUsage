@@ -16,7 +16,18 @@ Add-Type -Namespace ClaudeUsage -Name Dpi -MemberDefinition @'
 '@
 [ClaudeUsage.Dpi]::SetProcessDpiAwareness($PerMonitorDpiAware) | Out-Null
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.IO.Compression.FileSystem
+# for the runaway trips outside the widget: where the mouse and the other windows are, and moving a window without focusing it
+Add-Type -Namespace ClaudeUsage -Name Win -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+[DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out RECT box);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr handle, int index);
+[DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr handle, int index, int value);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr handle, IntPtr after, int x, int y, int width, int height, uint flags);
+'@
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # ---------- settings ----------
@@ -28,6 +39,11 @@ $PlacementPath = Join-Path $AppFolder 'claude-usage.window.json'   # remembers t
 $EventsPath = Join-Path $AppFolder 'claude-usage.events.jsonl'     # written by claude-usage-hook.ps1
 $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbers received, shown at startup
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
+# updates: the newest release zip of the (public) GitHub repo; only the scripts change, the .exe launcher never does
+$UpdateUrl = 'https://github.com/malekje/ClaudeCodeUsage/releases/latest/download/ClaudeUsage.zip'
+$UpdatedFiles = 'claude-usage.ps1', 'claude-usage-hook.ps1'
+$UpdateZipPath = Join-Path $env:TEMP 'ClaudeUsage-update.zip'
+$UpdateCheckDelaySeconds = 5   # after the window is up, so a slow network does not delay the start
 # behind a company proxy (407 "proxy authentication required"), sign in to it as the Windows user, like the browser does
 [Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials
 $SystemProxy = [Net.WebRequest]::DefaultWebProxy
@@ -108,11 +124,34 @@ $StormFadeStep = 0.02
 $CloudColor = '#45443F'
 $StormCloudColor = '#6B6962'
 
-# forecast under the session bar
+# forecast of the session usage at reset time (the characters talk about it)
 $SessionKey = 'five_hour'
 $SessionWindowHours = 5
 $MinForecastHours = 0.1      # too early to tell before that
-$ContentWidth = 480
+
+# a runaway: now and then somebody leaves the widget for a trip around the screens
+$RunawayOdds = if ($Demo) { 200 } else { 6000 }   # chance per frame while things are calm: about every 5 minutes
+$RunawayScale = 1.5           # a bit bigger outside than inside the small widget
+$RunawaySpeed = 9             # screen pixels per frame
+$FleeSpeed = 24
+$RunawayHopHeight = 10
+$RunawayGravity = 1.5
+$RunawayLineRoom = 26         # room above the character for what it shouts
+$RunawaySwingRoom = 20        # room on the sides while it swings
+$HangGap = 18                 # below the tip of the mouse arrow, so the arrow stays visible
+$HangTicks = 200              # 10 s on the mouse, then it lets go
+$SwingDegrees = 14
+$SwingPeriodTicks = 4
+$RunawaySitTicks = 400        # 20 s sitting where it landed, then it walks home
+$CatchDistance = 130          # the mouse this close means the human wants to catch it
+$MinPerchWidth = 300
+$MinPerchHeadroom = 60        # a maximized window has no top edge to stand on
+$PerchEdgeMargin = 60
+$RunawayLines = @{ Leave = 'Brb!'; Hang = 'Wheee!'; Sit = 'Catch me!'; Flee = 'Nope!'; Home = 'Home!'; Work = 'Coming!' }
+$ExtendedStyleIndex = -20     # GWL_EXSTYLE
+$ClickThroughStyles = 0x20 -bor 0x80 -bor 0x08000000   # transparent to clicks, no Alt+Tab entry, never takes focus
+$TopmostWindow = [IntPtr]-1
+$MoveOnlyFlags = 0x0001 -bor 0x0010   # keep the size, do not activate
 
 # a failed command: the others come and look
 $GatherTicks = 120
@@ -298,6 +337,10 @@ $window = [Windows.Markup.XamlReader]::Parse(@'
           </Border>
         </Canvas>
         <DockPanel Margin="0,8,0,0">
+          <Border Name="Update" DockPanel.Dock="Right" Visibility="Collapsed" Cursor="Hand" Background="#D97757" CornerRadius="6" Padding="10,3,10,3" Margin="10,0,0,0" VerticalAlignment="Top"
+                  ToolTip="A new version is on GitHub: installs it and restarts the widget">
+            <TextBlock Text="Update" FontSize="12" FontWeight="SemiBold" Foreground="#262624"/>
+          </Border>
           <Border Name="Renew" DockPanel.Dock="Right" Visibility="Collapsed" Cursor="Hand" Background="#D97757" CornerRadius="6" Padding="10,3,10,3" Margin="10,0,0,0" VerticalAlignment="Top"
                   ToolTip="Runs a tiny Haiku request in the background so Claude Code renews the login">
             <TextBlock Name="RenewText" Text="Renew login" FontSize="12" FontWeight="SemiBold" Foreground="#262624"/>
@@ -313,6 +356,7 @@ $rows = $window.FindName('Rows')
 $status = $window.FindName('Status')
 $renewButton = $window.FindName('Renew')
 $renewText = $window.FindName('RenewText')
+$updateButton = $window.FindName('Update')
 $stage = $window.FindName('Stage')
 $sky = $window.FindName('Sky')
 $bubble = $window.FindName('Bubble')
@@ -404,17 +448,8 @@ function Get-Forecast($percent, $resetsAt) {
     @{ Text = 'At this pace: limit in ' + (Format-Duration $untilLimit); AtReset = $LimitPercent; TooFast = $true }
 }
 
-# $forecast (optional) adds a marker on the bar where the usage will be at reset time, and a line of text under it.
-function Add-Row($label, $percent, $reset, $pulse, $forecast) {
+function Add-Row($label, $percent, $reset, $pulse) {
     $barColor = if ($percent -ge $AlertPercent) { $AlertColor } else { '#D97757' }
-    $marker = ''
-    $forecastLine = ''
-    if ($forecast) {
-        $markerLeft = [math]::Max(0, [math]::Round($forecast.AtReset * $ContentWidth / 100) - 2)
-        $forecastColor = if ($forecast.TooFast) { $AlertColor } else { $LabelColor }
-        $marker = "<Rectangle Width='2' Fill='#F5F4EE' Opacity='0.75' HorizontalAlignment='Left' Margin='$markerLeft,0,0,0'/>"
-        $forecastLine = "<TextBlock FontSize='11' Margin='0,3,0,0' Foreground='$forecastColor' Text='$($forecast.Text)'/>"
-    }
     $row = [Windows.Markup.XamlReader]::Parse(@"
 <StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Margin="0,12,0,0">
   <DockPanel>
@@ -423,9 +458,7 @@ function Add-Row($label, $percent, $reset, $pulse, $forecast) {
   </DockPanel>
   <Grid Margin="0,4,0,0" Height="12">
     <ProgressBar Height="8" VerticalAlignment="Center" Maximum="100" Value="$percent" Foreground="$barColor" Background="#3D3C38" BorderThickness="0"/>
-    $marker
   </Grid>
-  $forecastLine
 </StackPanel>
 "@)
     if ($pulse) { $row.Children[1].BeginAnimation([Windows.UIElement]::OpacityProperty, $pulseAnimation) }
@@ -443,14 +476,14 @@ function Get-DemoUsage {
 
 # Some company proxies refuse scripts (407, or they drop the connection) while a direct connection works, others are the only way out:
 # when the current route is refused, try the other one once; whichever works stays in use.
-function Invoke-UsageRequest($headers) {
-    try { return Invoke-RestMethod -Uri $UsageUrl -TimeoutSec 5 -Headers $headers }
+function Invoke-OnAnyRoute($request) {
+    try { return & $request }
     catch {
         $response = $_.Exception.Response
         if ($response -and [int]$response.StatusCode -ne $ProxyAuthStatus) { throw }
     }
     [Net.WebRequest]::DefaultWebProxy = if ([Net.WebRequest]::DefaultWebProxy -eq $DirectRoute) { $SystemProxy } else { $DirectRoute }
-    Invoke-RestMethod -Uri $UsageUrl -TimeoutSec 5 -Headers $headers
+    & $request
 }
 
 function Get-Usage {
@@ -463,7 +496,8 @@ function Get-Usage {
     $expiresAt = $script:oauth.expiresAt
     if ($expiresAt -and [datetimeoffset]::UtcNow.ToUnixTimeMilliseconds() -gt $expiresAt) { throw $TokenExpiredError }
     # ponytail: synchronous call pauses the animation while it runs (5s worst case); move to a runspace if that annoys
-    Invoke-UsageRequest @{ Authorization = "Bearer $token"; 'anthropic-beta' = 'oauth-2025-04-20' }
+    $headers = @{ Authorization = "Bearer $token"; 'anthropic-beta' = 'oauth-2025-04-20' }
+    Invoke-OnAnyRoute { Invoke-RestMethod -Uri $UsageUrl -TimeoutSec 5 -Headers $headers }
 }
 
 # A limit moved since the last refresh: wake everybody up and have somebody announce it.
@@ -492,7 +526,7 @@ function Show-Usage($usage) {
         $script:previousPercent[$key] = $percent
         $forecast = if ($key -eq $SessionKey) { Get-Forecast $percent $limit.resets_at } else { $null }
         if ($key -eq $SessionKey) { $script:forecast = $forecast }
-        Add-Row $Limits[$key] $percent (Format-Reset $limit.resets_at) ($delta -ne 0) $forecast
+        Add-Row $Limits[$key] $percent (Format-Reset $limit.resets_at) ($delta -ne 0)
         if ($delta -ne 0) { Register-Change $Limits[$key] $delta $percent }
     }
     $script:sessionPercent = [math]::Round([double]$usage.five_hour.utilization)
@@ -553,6 +587,43 @@ function Update-Usage {
         # renew by itself once per expiry; the button stays as the retry if that fails
         if ($rejected -and -not $script:autoRenewTried) { $script:autoRenewTried = $true; Start-Renew }
     }
+}
+
+# ---------- updates ----------
+
+function Get-FileHashText($bytes) { [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)) }
+
+function Read-ZipEntry($zip, $name) {
+    $entry = $zip.GetEntry($name)
+    if (-not $entry) { return $null }
+    $stream = $entry.Open()
+    try { $buffer = New-Object IO.MemoryStream; $stream.CopyTo($buffer); $buffer.ToArray() } finally { $stream.Dispose() }
+}
+
+# Downloads the newest release and shows the Update button when its widget script differs from this one.
+# Quiet on any failure (offline, GitHub down): an update check must never get in the way of the widget.
+function Test-Update {
+    try {
+        Invoke-OnAnyRoute { Invoke-WebRequest -Uri $UpdateUrl -OutFile $UpdateZipPath -UseBasicParsing -TimeoutSec 15 }
+        $zip = [IO.Compression.ZipFile]::OpenRead($UpdateZipPath)
+        try { $published = Read-ZipEntry $zip $UpdatedFiles[0] } finally { $zip.Dispose() }
+        if (-not $published) { return }
+        $installed = [IO.File]::ReadAllBytes((Join-Path $AppFolder $UpdatedFiles[0]))
+        if ((Get-FileHashText $published) -ne (Get-FileHashText $installed)) { $updateButton.Visibility = 'Visible' }
+    } catch { return }
+}
+
+# Writes the new scripts over the old ones (this one is already loaded, so it can be replaced) and restarts after the window closes.
+function Install-Update {
+    $zip = [IO.Compression.ZipFile]::OpenRead($UpdateZipPath)
+    try {
+        foreach ($name in $UpdatedFiles) {
+            $bytes = Read-ZipEntry $zip $name
+            if ($bytes) { [IO.File]::WriteAllBytes((Join-Path $AppFolder $name), $bytes) }
+        }
+    } finally { $zip.Dispose() }
+    $script:restartAfterClose = $true
+    $window.Close()
 }
 
 # ---------- renewing the login ----------
@@ -716,12 +787,11 @@ function Register-Success($hookEvent, $busyActivity) {
 }
 
 function Restore-Today {
-    $script:today = @{ Date = (Get-Date -Format 'yyyy-MM-dd'); Prompts = 0; Tools = 0 }
+    $script:today = @{ Date = (Get-Date -Format 'yyyy-MM-dd'); Prompts = 0 }
     if ($Demo -or -not (Test-Path $TodayPath)) { return }
     try { $saved = Get-Content $TodayPath -Raw | ConvertFrom-Json } catch { return }   # unreadable file: count from zero
     if ("$($saved.Date)" -ne $script:today.Date) { return }
     $script:today.Prompts = [int]$saved.Prompts
-    $script:today.Tools = [int]$saved.Tools
 }
 
 function Add-TodayCount($field) {
@@ -749,7 +819,7 @@ function Receive-HookEvent($hookEvent) {
             foreach ($character in $characters) { $character.PauseTicks = $PromptPauseTicks }
             Add-TodayCount 'Prompts'
         }
-        'PreToolUse'         { Set-ToolActivity $hookEvent $busyActivity; Add-TodayCount 'Tools' }
+        'PreToolUse'         { Set-ToolActivity $hookEvent $busyActivity }
         'PostToolUse'        { Register-Success $hookEvent $busyActivity }
         'PostToolUseFailure' { Register-Failure $hookEvent }
         'PermissionRequest' { $script:activity = 'needsYou' }
@@ -922,16 +992,17 @@ function Update-Weather {
     Add-DotParticle $flakes.Size (Get-RandomItem $flakes.Colors) (Get-RandomBetween 0 $stage.Width) 0 (Get-RandomBetween (-0.4) 0.4) 1.2 105
 }
 
-# The wooden sign: today's prompts and tool calls, or the time until the reset when the tokens are gone.
+# The wooden sign: today's prompts, or the time until the reset when the tokens are gone.
 function Update-Sign {
     $script:partyDay = (Get-Date).DayOfWeek -eq 'Friday'   # party hats all day
     if ($script:mood -eq 'exhausted') {
         $signTitle.Text = 'Out of tokens'
         $signDetail.Text = "$script:sessionReset" -replace '^Resets in', 'Back in'
+        $signDetail.Visibility = 'Visible'
         return
     }
     $signTitle.Text = 'Today: ' + (Format-Count $script:today.Prompts 'prompt')
-    $signDetail.Text = Format-Count $script:today.Tools 'tool call'
+    $signDetail.Visibility = 'Collapsed'
 }
 
 function Format-Count($count, $noun) { "$count $noun" + $(if ($count -ne 1) { 's' }) }
@@ -1129,7 +1200,7 @@ function New-Character($member, $startX) {
     foreach ($part in @($frames) + $eyes, $lids, $mouth, $sweat, $hat, $overhead, $nameTag) { $view.Children.Add($part) | Out-Null }
     $stage.Children.Add($view) | Out-Null
     [pscustomobject]@{
-        Name = $member.Name; View = $view; Frames = $frames; Eyes = $eyes; Lids = $lids; Mouth = $mouth; Sweat = $sweat
+        Name = $member.Name; Color = $member.Color; Escaped = $false; View = $view; Frames = $frames; Eyes = $eyes; Lids = $lids; Mouth = $mouth; Sweat = $sweat
         Hat = $hat; HomeSide = $member.HomeSide; Overhead = $overhead; Breath = $breath; PixelSize = $size; Width = $width; Top = $GroundY - $height
         X = $startX; Speed = $member.Speed; Direction = (1, -1)[$random.Next(2)]; Talking = $false; Walking = $false
         PauseTicks = 0; BlinkCountdown = $random.Next(20, 120); HopTick = 0
@@ -1214,7 +1285,7 @@ function Get-Role($character) {
 # True when moving to $newX would walk into another character (they bump and turn around instead of overlapping).
 function Test-Bump($character, $newX) {
     foreach ($other in $characters) {
-        if ($other.Name -eq $character.Name) { continue }
+        if ($other.Name -eq $character.Name -or $other.Escaped) { continue }
         $currentDistance = [math]::Abs((Get-Center $character) - (Get-Center $other))
         $newDistance = [math]::Abs($newX + $character.Width / 2 - (Get-Center $other))
         $touching = $newDistance -lt ($character.Width + $other.Width) / 2 + $PersonalSpace
@@ -1327,6 +1398,7 @@ function Move-Guest($guest) {
 
 # Returns whether the character walked this tick.
 function Move-Character($character) {
+    if ($character.Escaped) { return $false }   # out on a trip, see Update-Runaway
     if (Test-Held $character) { return $true }   # dangling from the mouse, legs kicking
     if ($character.Altitude -gt 0 -or $character.FallSpeed -ne 0) { Step-Fall $character; return $false }
     if ($character.Talking) { return $false }
@@ -1497,7 +1569,7 @@ function Set-TalkPhase($talk, $phase, $ticks) {
 # A line may name its Speaker and Listener; otherwise somebody free says it to whoever is nearest.
 function Start-Conversation($line, $shout) {
     # whoever is busy with Claude's task does not chat
-    $free = @($characters | Where-Object { (Get-Role $_) -notin 'work', 'pace', 'call' })
+    $free = @($characters | Where-Object { (Get-Role $_) -notin 'work', 'pace', 'call' -and -not $_.Escaped })
     if ($free.Count -lt 2) { return }
     $speaker = $free | Where-Object { $_.Name -eq $line.Speaker } | Select-Object -First 1
     if (-not $speaker) { $speaker = Get-RandomItem $free }
@@ -1552,6 +1624,208 @@ function Step-Conversation {
     }
 }
 
+# ---------- runaway: now and then somebody leaves the widget, hangs on the mouse or sits on a window, and runs home when the human comes close ----------
+# Everything outside the widget is in screen pixels (this process is per-monitor DPI aware), so mouse, windows and screens all agree.
+
+function Get-CursorPoint {
+    $point = New-Object ClaudeUsage.Win+POINT
+    [ClaudeUsage.Win]::GetCursorPos([ref]$point) | Out-Null
+    $point
+}
+
+function Get-WindowBox($handle) {
+    $box = New-Object ClaudeUsage.Win+RECT
+    [ClaudeUsage.Win]::GetWindowRect($handle, [ref]$box) | Out-Null
+    $box
+}
+
+function Test-NearWidget($x, $y, $margin) {
+    $box = Get-WindowBox (New-Object Windows.Interop.WindowInteropHelper $window).Handle
+    $x -gt $box.Left - $margin -and $x -lt $box.Right + $margin -and $y -gt $box.Top - $margin -and $y -lt $box.Bottom + $margin
+}
+
+# A see-through, click-through little window with just the character in it (and room above for what it shouts).
+function New-RunawayWindow($character) {
+    $size = $character.PixelSize * $RunawayScale
+    $bodyWidth = $BodyRows[0].Length * $size
+    $bodyHeight = ($BodyRows.Count + 1) * $size
+    $width = $bodyWidth + 2 * $RunawaySwingRoom
+    $height = $RunawayLineRoom + $bodyHeight
+    $runawayWindow = [Windows.Markup.XamlReader]::Parse(@"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False" ShowActivated="False" ResizeMode="NoResize" Left="-32000" Top="-32000" Width="$width" Height="$height">
+  <Grid>
+    <Border Name="Line" Background="#F5F4EE" CornerRadius="8" Padding="6,1,6,1" HorizontalAlignment="Center" VerticalAlignment="Top" Visibility="Hidden">
+      <TextBlock Name="LineText" FontSize="13" FontFamily="Segoe UI" Foreground="#262624"/>
+    </Border>
+    <Canvas Name="Body" Width="$bodyWidth" Height="$bodyHeight" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+  </Grid>
+</Window>
+"@)
+    $body = $runawayWindow.FindName('Body')
+    $frames = foreach ($pixelRows in $FrameRows) { New-Frame $pixelRows $size $character.Color }
+    $eyes = New-Frame $EyeRows $size $character.Color
+    foreach ($part in @($frames) + $eyes) { $body.Children.Add($part) | Out-Null }
+    $swing = New-Object Windows.Media.RotateTransform 0, ($bodyWidth / 2), 0   # hangs from the top middle, like from a hand
+    $body.RenderTransform = $swing
+    $runawayWindow.Show()
+    $handle = (New-Object Windows.Interop.WindowInteropHelper $runawayWindow).Handle
+    $style = [ClaudeUsage.Win]::GetWindowLong($handle, $ExtendedStyleIndex)
+    [ClaudeUsage.Win]::SetWindowLong($handle, $ExtendedStyleIndex, $style -bor $ClickThroughStyles) | Out-Null
+    @{ Window = $runawayWindow; Handle = $handle; Frames = $frames; Eyes = $eyes; Swing = $swing; PixelSize = $size
+       Line = $runawayWindow.FindName('Line'); LineText = $runawayWindow.FindName('LineText'); BodyShare = $bodyHeight / $height }
+}
+
+# Screen pixels from the bottom of the window to the top of the character, at the DPI of the monitor it is on now.
+function Get-BodyHeight($runaway) {
+    $box = Get-WindowBox $runaway.Handle
+    ($box.Bottom - $box.Top) * $runaway.BodyShare
+}
+
+function Show-RunawayLine($runaway, $text) {
+    if (-not $text) { return }
+    $runaway.LineText.Text = $text
+    $runaway.Line.Visibility = 'Visible'
+    $runaway.LineTicks = $BubbleTicks
+}
+
+function Set-RunawayPhase($runaway, $phase, $ticks, $text) {
+    $runaway.Phase = $phase
+    $runaway.Ticks = $ticks
+    Show-RunawayLine $runaway $text
+}
+
+function Send-RunawayHome($runaway, $speed, $text) {
+    $runaway.Speed = $speed
+    $runaway.Swing.Angle = 0
+    Set-RunawayPhase $runaway 'home' 0 $text
+}
+
+# Moves the feet one step towards a point. Returns $true once there.
+function Move-Runaway($runaway, $targetX, $targetY, $speed) {
+    $dx = $targetX - $runaway.FeetX
+    $dy = $targetY - $runaway.FeetY
+    $distance = [math]::Sqrt($dx * $dx + $dy * $dy)
+    if ($distance -le $speed) { $runaway.FeetX = $targetX; $runaway.FeetY = $targetY; return $true }
+    $runaway.FeetX += $dx * $speed / $distance
+    $runaway.FeetY += $dy * $speed / $distance
+    $false
+}
+
+function Get-HomeSpot($character) { $stage.PointToScreen([Windows.Point]::new((Get-Center $character), $GroundY)) }
+
+# The top edge of the window the human is using, if there is one to stand on (not maximized, not this widget).
+function Get-PerchSpot {
+    $handle = [ClaudeUsage.Win]::GetForegroundWindow()
+    if ($handle -eq [IntPtr]::Zero -or $handle -eq (New-Object Windows.Interop.WindowInteropHelper $window).Handle) { return $null }
+    $box = Get-WindowBox $handle
+    $screenTop = [Windows.Forms.Screen]::FromHandle($handle).Bounds.Top
+    if ($box.Right - $box.Left -lt $MinPerchWidth -or $box.Top -lt $screenTop + $MinPerchHeadroom) { return $null }
+    @{ X = Get-RandomBetween ($box.Left + $PerchEdgeMargin) ($box.Right - $PerchEdgeMargin); Y = $box.Top }
+}
+
+function Start-Runaway($character) {
+    $runaway = New-RunawayWindow $character
+    $runaway.Character = $character
+    $start = Get-HomeSpot $character
+    $runaway.FeetX = $start.X
+    $runaway.FeetY = $start.Y
+    $runaway.FallSpeed = 0
+    $runaway.LineTicks = 0
+    $perch = Get-PerchSpot
+    if ($perch -and $random.Next(2) -eq 0) {
+        $runaway.TargetX = $perch.X
+        $runaway.TargetY = $perch.Y
+        Set-RunawayPhase $runaway 'perch' 0 $RunawayLines.Leave
+    } else {
+        Set-RunawayPhase $runaway 'chase' 0 $RunawayLines.Leave
+    }
+    $character.Escaped = $true
+    $character.View.Visibility = 'Hidden'
+    $script:runaway = $runaway
+}
+
+function Stop-Runaway {
+    $runaway = $script:runaway
+    if (-not $runaway) { return }
+    $script:runaway = $null
+    $runaway.Window.Close()
+    $runaway.Character.Escaped = $false
+    $runaway.Character.View.Visibility = 'Visible'
+}
+
+# Only when things are calm, and never right under the human's nose.
+function Test-RunawayChance {
+    if ($script:conversation -or $script:held -or $script:partyTicksLeft -gt 0) { return }
+    if ($script:activity -ne 'idle' -or $script:mood -in 'asleep', 'exhausted') { return }
+    if ($random.Next($RunawayOdds) -ne 0) { return }
+    $cursor = Get-CursorPoint
+    if (Test-NearWidget $cursor.X $cursor.Y $CatchDistance) { return }
+    $ready = @($characters | Where-Object { $_.Altitude -eq 0 -and -not $_.Sleeping -and -not $_.Talking })
+    if ($ready.Count -gt 0) { Start-Runaway (Get-RandomItem $ready) }
+}
+
+# One frame of the trip. Returns $true while it walks or runs.
+function Step-RunawayPhase($runaway, $cursor) {
+    switch ($runaway.Phase) {
+        'chase' {
+            $hangY = $cursor.Y + $HangGap + (Get-BodyHeight $runaway)
+            if (Move-Runaway $runaway $cursor.X $hangY $RunawaySpeed) { Set-RunawayPhase $runaway 'hang' $HangTicks $RunawayLines.Hang }
+            return $true
+        }
+        'hang' {
+            $runaway.FeetX = $cursor.X
+            $runaway.FeetY = $cursor.Y + $HangGap + (Get-BodyHeight $runaway)
+            $runaway.Swing.Angle = $SwingDegrees * [math]::Sin($script:tick / $SwingPeriodTicks)
+            $runaway.Ticks--
+            if (Test-NearWidget $cursor.X $cursor.Y 0) { Send-RunawayHome $runaway $RunawaySpeed $RunawayLines.Home }   # carried all the way home
+            elseif ($runaway.Ticks -le 0) { $runaway.Swing.Angle = 0; $runaway.FallSpeed = 0; $runaway.Phase = 'fall' }
+        }
+        'fall' {
+            $runaway.FallSpeed += $RunawayGravity
+            $runaway.FeetY += $runaway.FallSpeed
+            # lands on the taskbar of the screen it fell on
+            $floor = [Windows.Forms.Screen]::FromPoint([Drawing.Point]::new([int]$runaway.FeetX, [int]$cursor.Y)).WorkingArea.Bottom
+            if ($runaway.FeetY -ge $floor) { $runaway.FeetY = $floor; Set-RunawayPhase $runaway 'sit' $RunawaySitTicks $RunawayLines.Sit }
+        }
+        'perch' {
+            if (Move-Runaway $runaway $runaway.TargetX $runaway.TargetY $RunawaySpeed) { Set-RunawayPhase $runaway 'sit' $RunawaySitTicks $RunawayLines.Sit }
+            return $true
+        }
+        'sit' {
+            $dx = $cursor.X - $runaway.FeetX
+            $dy = $cursor.Y - ($runaway.FeetY - (Get-BodyHeight $runaway) / 2)
+            $runaway.Ticks--
+            if ([math]::Sqrt($dx * $dx + $dy * $dy) -lt $CatchDistance) { Send-RunawayHome $runaway $FleeSpeed $RunawayLines.Flee }
+            elseif ($runaway.Ticks -le 0) { Send-RunawayHome $runaway $RunawaySpeed $null }
+        }
+        'home' {
+            $homeSpot = Get-HomeSpot $runaway.Character
+            if (Move-Runaway $runaway $homeSpot.X $homeSpot.Y $runaway.Speed) { Stop-Runaway }
+            return $true
+        }
+    }
+    $false
+}
+
+function Update-Runaway {
+    $runaway = $script:runaway
+    if (-not $runaway) { Test-RunawayChance; return }
+    if ($runaway.LineTicks -gt 0) { $runaway.LineTicks--; if ($runaway.LineTicks -eq 0) { $runaway.Line.Visibility = 'Hidden' } }
+    if ($script:activity -ne 'idle' -and $runaway.Phase -ne 'home') { Send-RunawayHome $runaway $FleeSpeed $RunawayLines.Work }   # Claude needs everybody
+    $moving = Step-RunawayPhase $runaway (Get-CursorPoint)
+    if (-not $script:runaway) { return }   # just got home
+    $sitting = $runaway.Phase -eq 'sit'
+    $frameIndex = if ($sitting) { 2 } elseif ($moving) { [int][math]::Floor($script:tick / 3) % 2 } else { 0 }
+    for ($i = 0; $i -lt $runaway.Frames.Count; $i++) { $runaway.Frames[$i].Visibility = Get-Visibility ($i -eq $frameIndex) }
+    [Windows.Controls.Canvas]::SetTop($runaway.Eyes, [int]$sitting * $runaway.PixelSize)   # the sitting frame is one pixel lower
+    $lift = if ($moving) { $RunawayHopHeight * [math]::Abs([math]::Sin($script:tick / 3)) } else { 0 }   # little hops
+    $box = Get-WindowBox $runaway.Handle
+    $left = [int]($runaway.FeetX - ($box.Right - $box.Left) / 2)
+    $top = [int]($runaway.FeetY - ($box.Bottom - $box.Top) - $lift)
+    [ClaudeUsage.Win]::SetWindowPos($runaway.Handle, $TopmostWindow, $left, $top, 0, 0, $MoveOnlyFlags) | Out-Null
+}
+
 # ---------- wiring ----------
 
 $script:previousPercent = @{}
@@ -1585,6 +1859,7 @@ $script:renewStarted = $null
 $script:autoRenewTried = $false
 $script:loginOpened = $false
 $script:held = $null           # what the mouse is carrying: a character or the ball
+$script:runaway = $null        # the one out on a trip around the screens
 $script:todayChanged = $false
 Restore-Today
 # only events from now on: whatever happened before the widget opened is old news
@@ -1703,6 +1978,14 @@ $stage.Children.Add($dreamBubble) | Out-Null
 $window.FindName('Close').Add_MouseLeftButtonDown({ $_.Handled = $true; $window.Close() })
 $window.FindName('Minimize').Add_MouseLeftButtonDown({ $_.Handled = $true; $window.WindowState = 'Minimized' })
 $renewButton.Add_MouseLeftButtonDown({ $_.Handled = $true; Start-Renew })
+$updateButton.Add_MouseLeftButtonDown({
+    $_.Handled = $true
+    try { Install-Update } catch { $status.Text = Show-Error "Update failed: $($_.Exception.Message)" }
+})
+$updateTimer = New-Object Windows.Threading.DispatcherTimer
+$updateTimer.Interval = [TimeSpan]::FromSeconds($UpdateCheckDelaySeconds)
+$updateTimer.Add_Tick({ $updateTimer.Stop(); Test-Update })
+$script:restartAfterClose = $false
 $renewTimer = New-Object Windows.Threading.DispatcherTimer
 $renewTimer.Interval = [TimeSpan]::FromSeconds(1)
 $renewTimer.Add_Tick({ Step-Renew })
@@ -1727,7 +2010,7 @@ Restore-Placement
 $script:placementChanged = $false
 $window.Add_SizeChanged({ $script:placementChanged = $true })
 $window.Add_LocationChanged({ $script:placementChanged = $true })
-$window.Add_Closing({ Save-Placement; Save-Today })
+$window.Add_Closing({ Stop-Runaway; Save-Placement; Save-Today })
 
 $usageTimer = New-Object Windows.Threading.DispatcherTimer
 $usageTimer.Interval = [TimeSpan]::FromSeconds($RefreshSeconds)
@@ -1740,13 +2023,14 @@ $animationTimer.Interval = [TimeSpan]::FromMilliseconds($AnimationMilliseconds)
 $animationTimer.Add_Tick({
     # an error in one frame must not close an always-on widget: show it in the status line and keep going
     try {
-        if ($window.WindowState -eq 'Minimized') { return }   # nobody is watching: do not spend CPU animating
+        if ($window.WindowState -eq 'Minimized') { Stop-Runaway; return }   # nobody is watching: do not spend CPU animating
         $script:tick++
         if ($script:tick % $EventPollTicks -eq 0) { Read-HookEvents }
         if ($script:tick % 20 -eq 0) { Reset-StaleActivity; Update-Mood; Update-Sign }
         if ($script:celebrateTicksLeft -gt 0) { $script:celebrateTicksLeft-- }
         if ($script:gatherTicksLeft -gt 0) { $script:gatherTicksLeft-- }
         Step-Hold
+        Update-Runaway
         $legPeriod = if ($script:mood -eq 'panic' -or $script:partyTicksLeft -gt 0) { 2 } else { 4 }
         $legFrame = [int][math]::Floor($script:tick / $legPeriod) % 2
         foreach ($character in $characters) { $character.Walking = Move-Character $character }
@@ -1773,4 +2057,8 @@ $animationTimer.Start()
 Show-SavedUsage
 Update-Usage
 Update-Sign
+if (-not $Demo) { $updateTimer.Start() }   # the demo stays offline
 $window.ShowDialog() | Out-Null
+if ($script:restartAfterClose) {
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`""
+}

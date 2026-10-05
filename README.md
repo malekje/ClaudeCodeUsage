@@ -17,6 +17,9 @@ You can also skip the `.exe` and run: `powershell -ExecutionPolicy Bypass -Windo
 
 Try it without your account: add `-Demo` (fake numbers, shows the animations).
 
+Updates: when a newer release is on GitHub, an **Update** button shows up a few seconds after you open the widget.
+One click replaces `claude-usage.ps1` and `claude-usage-hook.ps1` with the new ones and restarts the widget (the `.exe` never changes).
+
 ## What it reads and sends
 
 - Reads your own login from `~/.claude/.credentials.json` and asks `https://api.anthropic.com/api/oauth/usage` for your numbers, once a minute. Nothing else is sent anywhere.

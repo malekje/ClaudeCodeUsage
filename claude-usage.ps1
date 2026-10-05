@@ -28,6 +28,8 @@ $PlacementPath = Join-Path $AppFolder 'claude-usage.window.json'   # remembers t
 $EventsPath = Join-Path $AppFolder 'claude-usage.events.jsonl'     # written by claude-usage-hook.ps1
 $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbers received, shown at startup
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
+# behind a company proxy (407 "proxy authentication required"), sign in to it as the Windows user, like the browser does
+[Net.WebRequest]::DefaultWebProxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials
 $RefreshSeconds = if ($Demo) { 6 } else { 60 }            # 30 s got "429 Too Many Requests" from the server now and then
 $MaxRefreshSeconds = 600                                  # slowest pace while the server keeps saying "too many requests"
 $TooManyRequestsStatus = 429

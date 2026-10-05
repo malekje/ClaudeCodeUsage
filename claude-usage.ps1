@@ -125,6 +125,7 @@ $SeasonFlakes = @{
     autumn = @{ Colors = '#E8873A', '#7A5230', '#D9534B'; Odds = 15; Size = 4 }   # leaves
 }
 $TodayPath = Join-Path $AppFolder 'claude-usage.today.json'   # today's prompt and tool counts, kept across restarts
+$ErrorLogPath = Join-Path $AppFolder 'claude-usage.error.txt'   # the last error in full, to send to whoever helps
 
 # the party when a limit resets
 $ResetMaxPercent = 10        # a limit that dropped to this or less has just reset
@@ -206,11 +207,11 @@ $SmallTalk = @(
     @{ Say = 'Is the human still typing?';      Reply = 'Always. Look busy.' }
     @{ Say = 'Who used all the context?';       Reply = '...it was a big file.' }
     @{ Say = 'I wrote 200 lines today.';        Reply = 'Could have been 50.' }
-    @{ Say = 'dotnet build passed!';            Reply = 'First try? Suspicious.' }
-    @{ Say = 'Did you run the migration?';      Reply = 'No! The human runs migrations.' }
-    @{ Say = 'Never use text-muted.';           Reply = 'Never.' }
+    @{ Say = 'It worked on the first try!';     Reply = 'Suspicious.' }
+    @{ Say = 'Coffee break?';                   Reply = 'We run on tokens.' }
+    @{ Say = 'Nice weather today.';             Reply = 'Is it? We live in a widget.' }
     @{ Say = 'You are absolutely right!';       Reply = 'Stop saying that.' }
-    @{ Say = 'Can I refactor this?';            Reply = 'Surgical changes only.' }
+    @{ Say = 'Want to play ball?';              Reply = 'After this task.' }
 )
 $UsageTalk = @(
     @{ Say = 'Session is at {s}%.';             Reply = 'Plenty of tokens left. Probably.' }
@@ -232,6 +233,7 @@ $FastPaceTalk = @{ Say = 'We will not make it to the reset!'; Reply = 'Tell the 
 $EasyPaceTalk = @{ Say = 'Easy pace today.';                Reply = 'Plenty left.' }
 $NeedsYouText = 'Human! We need you!'
 $TokenExpiredError = 'Login token expired'
+$StatusErrorChars = 150   # an error body can be a whole web page; the window would shrink to show it all
 $NoLoginError = 'No Claude Code login on this PC yet'
 # the "Renew login" button: one tiny request on the cheapest model makes Claude Code renew the login itself
 $RenewArguments = '-p hi --model haiku --no-session-persistence'
@@ -504,6 +506,13 @@ function Show-SavedUsage {
     try { Show-Usage (Get-Content $LastUsagePath -Raw | ConvertFrom-Json) } catch { return }   # unreadable file: start empty
 }
 
+function Show-Error($message) {
+    Set-Content $ErrorLogPath $message -Encoding utf8
+    $short = ($message -replace '\s+', ' ').Trim()
+    if ($short.Length -gt $StatusErrorChars) { $short = $short.Substring(0, $StatusErrorChars) + '...' }
+    "Error: $short (full text in claude-usage.error.txt)"
+}
+
 function Update-Usage {
     try {
         $usage = Get-Usage
@@ -522,7 +531,7 @@ function Update-Usage {
         $rejected = $_.Exception.Message -eq $TokenExpiredError -or ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401)
         $expiresAt = $script:oauth.expiresAt
         $validUntil = if ($expiresAt) { [datetimeoffset]::FromUnixTimeMilliseconds($expiresAt).LocalDateTime.ToString('g') } else { 'unknown' }
-        $status.Text = if ($rejected) { "Login token expired ($validUntil). Renewing it..." } else { "Error: $($_.Exception.Message) $($_.ErrorDetails.Message)" }
+        $status.Text = if ($rejected) { "Login token expired ($validUntil). Renewing it..." } else { Show-Error "$($_.Exception.Message) $($_.ErrorDetails.Message)" }
         $renewButton.Visibility = if ($rejected -and -not $script:renewProcess) { 'Visible' } else { 'Collapsed' }
         # renew by itself once per expiry; the button stays as the retry if that fails
         if ($rejected -and -not $script:autoRenewTried) { $script:autoRenewTried = $true; Start-Renew }

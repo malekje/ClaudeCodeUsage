@@ -40,6 +40,8 @@ $EventsPath = Join-Path $AppFolder 'claude-usage.events.jsonl'     # written by 
 $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbers received, shown at startup
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
 # updates: the newest release zip of the (public) GitHub repo; only the scripts change, the .exe launcher never does
+# raise on every change that should reach the others: the Update button only offers a higher version, never a lower one
+$AppVersion = '2.0'
 $UpdateUrl = 'https://github.com/malekje/ClaudeCodeUsage/releases/latest/download/ClaudeUsage.zip'
 $UpdatedFiles = 'claude-usage.ps1', 'claude-usage-hook.ps1'
 $UpdateZipPath = Join-Path $env:TEMP 'ClaudeUsage-update.zip'
@@ -591,7 +593,11 @@ function Update-Usage {
 
 # ---------- updates ----------
 
-function Get-FileHashText($bytes) { [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)) }
+# The $AppVersion line of a script; releases from before versions existed count as 0.
+function Get-ScriptVersion($scriptText) {
+    $found = [regex]::Match($scriptText, "(?m)^\`$AppVersion = '([0-9.]+)'")
+    if ($found.Success) { [version]$found.Groups[1].Value } else { [version]'0.0' }
+}
 
 function Read-ZipEntry($zip, $name) {
     $entry = $zip.GetEntry($name)
@@ -600,7 +606,7 @@ function Read-ZipEntry($zip, $name) {
     try { $buffer = New-Object IO.MemoryStream; $stream.CopyTo($buffer); $buffer.ToArray() } finally { $stream.Dispose() }
 }
 
-# Downloads the newest release and shows the Update button when its widget script differs from this one.
+# Downloads the newest release and shows the Update button when its widget script has a higher version than this one.
 # Quiet on any failure (offline, GitHub down): an update check must never get in the way of the widget.
 function Test-Update {
     try {
@@ -608,8 +614,8 @@ function Test-Update {
         $zip = [IO.Compression.ZipFile]::OpenRead($UpdateZipPath)
         try { $published = Read-ZipEntry $zip $UpdatedFiles[0] } finally { $zip.Dispose() }
         if (-not $published) { return }
-        $installed = [IO.File]::ReadAllBytes((Join-Path $AppFolder $UpdatedFiles[0]))
-        if ((Get-FileHashText $published) -ne (Get-FileHashText $installed)) { $updateButton.Visibility = 'Visible' }
+        $publishedVersion = Get-ScriptVersion ([Text.Encoding]::UTF8.GetString($published))
+        if ($publishedVersion -gt [version]$AppVersion) { $updateButton.Visibility = 'Visible' }
     } catch { return }
 }
 

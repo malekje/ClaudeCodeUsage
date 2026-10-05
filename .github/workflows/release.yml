@@ -1,0 +1,21 @@
+name: release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build launcher and zip
+        shell: pwsh
+        run: |
+          & "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /win32icon:claude-usage.ico /reference:System.Windows.Forms.dll /out:ClaudeUsage.exe launcher\ClaudeUsage.cs
+          Compress-Archive -Path ClaudeUsage.exe, claude-usage.ps1, claude-usage-hook.ps1, claude-usage.ico -DestinationPath ClaudeUsage.zip
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v1.0.${{ github.run_number }}" ClaudeUsage.zip --title "v1.0.${{ github.run_number }}" --generate-notes

@@ -232,6 +232,7 @@ $FastPaceTalk = @{ Say = 'We will not make it to the reset!'; Reply = 'Tell the 
 $EasyPaceTalk = @{ Say = 'Easy pace today.';                Reply = 'Plenty left.' }
 $NeedsYouText = 'Human! We need you!'
 $TokenExpiredError = 'Login token expired'
+$NoLoginError = 'No Claude Code login on this PC yet'
 # the "Renew login" button: one tiny request on the cheapest model makes Claude Code renew the login itself
 $RenewArguments = '-p hi --model haiku --no-session-persistence'
 # where Claude Code lives when it is not on PATH: the native installer, and the copy Claude Desktop bundles
@@ -437,7 +438,8 @@ function Get-Usage {
     if ($Demo) { return Get-DemoUsage }
     $script:oauth = (Get-Content $CredentialsPath -Raw -ErrorAction Stop | ConvertFrom-Json).claudeAiOauth
     $token = $script:oauth.accessToken
-    if (-not $token) { throw "No Claude login found in $CredentialsPath" }
+    # Claude Desktop keeps its own login elsewhere; this file can exist with only other logins (MCP servers) in it
+    if (-not $token) { throw $NoLoginError }
     # an expired token can only be answered with a 401: do not knock on the API every refresh, all day, for nothing
     $expiresAt = $script:oauth.expiresAt
     if ($expiresAt -and [datetimeoffset]::UtcNow.ToUnixTimeMilliseconds() -gt $expiresAt) { throw $TokenExpiredError }
@@ -515,7 +517,7 @@ function Update-Usage {
         $response = $_.Exception.Response
         if ($response -and [int]$response.StatusCode -eq $TooManyRequestsStatus) { Suspend-Refresh $response; return }
         if ($script:renewProcess) { return }   # the renew button is already working on it
-        if (-not $Demo -and -not (Test-Path $CredentialsPath)) { Start-Login; return }
+        if ($_.Exception.Message -eq $NoLoginError -or ($_.Exception -is [Management.Automation.ItemNotFoundException])) { Start-Login; return }
         # ponytail: the token is never refreshed here (that would rotate it and could log Claude out); Claude Code renews it when used
         $rejected = $_.Exception.Message -eq $TokenExpiredError -or ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401)
         $expiresAt = $script:oauth.expiresAt
@@ -537,8 +539,8 @@ function Find-ClaudeProgram {
     Get-ChildItem $ClaudeProgramPatterns -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 }
 
-# Claude Desktop keeps its login to itself, so a Desktop-only PC has no credentials file yet:
-# open one Claude Code sign-in window (once per run) that creates it; the next refresh then shows the stats.
+# Claude Desktop keeps its login to itself, so a Desktop-only PC has no Claude Code login yet:
+# open one Claude Code sign-in window (once per run) that writes it; the next refresh then shows the stats.
 function Start-Login {
     if ($script:loginOpened) { return }
     $claudeProgram = Find-ClaudeProgram

@@ -5,9 +5,11 @@ with animated pixel characters (Opus, Sonnet, Haiku) that react to your usage an
 
 ## Install (Windows)
 
-1. Install [Claude Code](https://claude.com/claude-code) and log in once (`claude`).
+1. Have [Claude Desktop](https://claude.ai/download) or [Claude Code](https://claude.com/claude-code) installed.
 2. Download `ClaudeUsage.zip` from the **Releases** page and unzip it anywhere.
 3. Double-click `ClaudeUsage.exe`. Keep `claude-usage.ps1` in the same folder.
+4. First run only: if this PC has no Claude Code login yet (common with Claude Desktop only, which keeps its login to itself),
+   a black Claude window opens. Sign in there (it opens your browser), then close it. Your stats appear in the widget within a minute.
 
 Windows SmartScreen or your antivirus may warn about the `.exe` because it is not code-signed.
 It only starts `claude-usage.ps1` in a hidden PowerShell; its source is in `launcher/ClaudeUsage.cs`.
@@ -18,7 +20,9 @@ Try it without your account: add `-Demo` (fake numbers, shows the animations).
 ## What it reads and sends
 
 - Reads your own login from `~/.claude/.credentials.json` and asks `https://api.anthropic.com/api/oauth/usage` for your numbers, once a minute. Nothing else is sent anywhere.
-- If the login has expired, a **Renew login** button runs `claude -p hi --model haiku` in the background (one tiny Haiku request).
+- It finds Claude Code on PATH, or the copy bundled with Claude Desktop.
+- If the login has expired, it renews it by itself with `claude -p hi --model haiku` in the background (one tiny Haiku request).
+  If that fails, a **Renew login** button lets you try again.
 
 ## Optional: characters react to Claude Code
 

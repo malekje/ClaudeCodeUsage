@@ -233,7 +233,14 @@ $EasyPaceTalk = @{ Say = 'Easy pace today.';                Reply = 'Plenty left
 $NeedsYouText = 'Human! We need you!'
 $TokenExpiredError = 'Login token expired'
 # the "Renew login" button: one tiny request on the cheapest model makes Claude Code renew the login itself
-$RenewCommand = 'claude -p hi --model haiku --no-session-persistence'
+$RenewArguments = '-p hi --model haiku --no-session-persistence'
+# where Claude Code lives when it is not on PATH: the native installer, and the copy Claude Desktop bundles
+# (a Store install of Claude Desktop keeps its AppData under Packages\Claude_*\LocalCache)
+$ClaudeProgramPatterns = @(
+    (Join-Path $env:USERPROFILE '.local\bin\claude.exe'),
+    (Join-Path $env:APPDATA 'Claude\claude-code\*\*\claude.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\*\*\claude.exe')
+)
 $RenewTimeoutSeconds = 90
 
 # what the working character shows for each Claude Code tool; Kind picks its animation
@@ -517,12 +524,24 @@ function Update-Usage {
 
 # ---------- renewing the login ----------
 
+function Find-ClaudeProgram {
+    # Application skips npm's claude.ps1, which Start-Process would open in Notepad
+    $onPath = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    # several Desktop versions can sit side by side: take the newest
+    Get-ChildItem $ClaudeProgramPatterns -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+
 function Start-Renew {
     if ($script:renewProcess) { return }
+    $claudeProgram = Find-ClaudeProgram
+    if (-not $claudeProgram) {
+        $status.Text = 'Claude Code was not found on this PC. Open the Code tab in Claude Desktop once (it renews the login), or install Claude Code.'
+        return
+    }
     $renewButton.Visibility = 'Collapsed'
     $status.Text = 'Renewing the login with a tiny Haiku request...'
-    # cmd /c runs claude whether it is installed as claude.exe or as the npm claude.cmd
-    $script:renewProcess = Start-Process cmd -ArgumentList '/c', $RenewCommand -WindowStyle Hidden -PassThru
+    $script:renewProcess = Start-Process $claudeProgram -ArgumentList $RenewArguments -WindowStyle Hidden -PassThru
     $script:renewStarted = Get-Date
     $renewTimer.Start()
 }

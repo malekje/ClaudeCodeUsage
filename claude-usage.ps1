@@ -41,7 +41,7 @@ $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbe
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
 # updates: the newest release zip of the (public) GitHub repo; only the scripts change, the .exe launcher never does
 # raise on every change that should reach the others: the Update button only offers a higher version, never a lower one
-$AppVersion = '2.0'
+$AppVersion = '2.1'
 $UpdateUrl = 'https://github.com/malekje/ClaudeCodeUsage/releases/latest/download/ClaudeUsage.zip'
 $UpdatedFiles = 'claude-usage.ps1', 'claude-usage-hook.ps1'
 $UpdateZipPath = Join-Path $env:TEMP 'ClaudeUsage-update.zip'
@@ -132,7 +132,7 @@ $SessionWindowHours = 5
 $MinForecastHours = 0.1      # too early to tell before that
 
 # a runaway: now and then somebody leaves the widget for a trip around the screens
-$RunawayOdds = if ($Demo) { 200 } else { 6000 }   # chance per frame while things are calm: about every 5 minutes
+$RunawayOdds = if ($Demo) { 200 } else { 3600 }   # chance per frame while somebody is free to go: about every 3 minutes
 $RunawayScale = 1.5           # a bit bigger outside than inside the small widget
 $RunawaySpeed = 9             # screen pixels per frame
 $FleeSpeed = 24
@@ -1760,14 +1760,13 @@ function Stop-Runaway {
     $runaway.Character.View.Visibility = 'Visible'
 }
 
-# Only when things are calm, and never right under the human's nose.
+# Only somebody who is just wandering around (not the one doing Claude's task, not a chatter), and never right under the human's nose.
 function Test-RunawayChance {
-    if ($script:conversation -or $script:held -or $script:partyTicksLeft -gt 0) { return }
-    if ($script:activity -ne 'idle' -or $script:mood -in 'asleep', 'exhausted') { return }
+    if ($script:held -or $script:partyTicksLeft -gt 0 -or $script:mood -in 'asleep', 'exhausted') { return }
     if ($random.Next($RunawayOdds) -ne 0) { return }
     $cursor = Get-CursorPoint
     if (Test-NearWidget $cursor.X $cursor.Y $CatchDistance) { return }
-    $ready = @($characters | Where-Object { $_.Altitude -eq 0 -and -not $_.Sleeping -and -not $_.Talking })
+    $ready = @($characters | Where-Object { $_.Altitude -eq 0 -and -not $_.Sleeping -and -not $_.Talking -and (Get-Role $_) -eq 'roam' })
     if ($ready.Count -gt 0) { Start-Runaway (Get-RandomItem $ready) }
 }
 
@@ -1818,7 +1817,7 @@ function Update-Runaway {
     $runaway = $script:runaway
     if (-not $runaway) { Test-RunawayChance; return }
     if ($runaway.LineTicks -gt 0) { $runaway.LineTicks--; if ($runaway.LineTicks -eq 0) { $runaway.Line.Visibility = 'Hidden' } }
-    if ($script:activity -ne 'idle' -and $runaway.Phase -ne 'home') { Send-RunawayHome $runaway $FleeSpeed $RunawayLines.Work }   # Claude needs everybody
+    if ((Get-Role $runaway.Character) -ne 'roam' -and $runaway.Phase -ne 'home') { Send-RunawayHome $runaway $FleeSpeed $RunawayLines.Work }   # Claude needs this one
     $moving = Step-RunawayPhase $runaway (Get-CursorPoint)
     if (-not $script:runaway) { return }   # just got home
     $sitting = $runaway.Phase -eq 'sit'

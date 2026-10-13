@@ -1,0 +1,11 @@
+# files the widget writes while it runs (they contain file names and your numbers)
+claude-usage.window.json
+claude-usage.events.jsonl
+claude-usage.last.json
+claude-usage.today.json
+claude-usage.error.txt
+# old experiments and build output
+*.vault-backup.ps1
+*.camp-backup.ps1
+dist/
+*.zip

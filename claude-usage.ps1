@@ -16,36 +16,7 @@ Add-Type -Namespace ClaudeUsage -Name Dpi -MemberDefinition @'
 '@
 [ClaudeUsage.Dpi]::SetProcessDpiAwareness($PerMonitorDpiAware) | Out-Null
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.IO.Compression.FileSystem
-# for the runaway trips outside the widget: the other apps' windows, and moving a window without focusing it
-Add-Type -Namespace ClaudeUsage -Name Win -MemberDefinition @'
-[StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
-[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-public delegate bool WindowVisitor(IntPtr handle, IntPtr data);
-[DllImport("user32.dll")] static extern bool EnumWindows(WindowVisitor visitor, IntPtr data);
-[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr handle, System.Text.StringBuilder name, int size);
-[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out RECT box);
-[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr handle);
-[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr handle);
-[DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr handle);
-[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
-[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
-[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr handle, uint flags);
-[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr handle, int index);
-[DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr handle, int index, int value);
-[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr handle, IntPtr after, int x, int y, int width, int height, uint flags);
-// all top-level windows, front to back
-public static System.Collections.Generic.List<IntPtr> GetTopWindows() {
-    var found = new System.Collections.Generic.List<IntPtr>();
-    EnumWindows(delegate (IntPtr handle, IntPtr data) { found.Add(handle); return true; }, IntPtr.Zero);
-    return found;
-}
-public static string GetClass(IntPtr handle) {
-    var name = new System.Text.StringBuilder(256);
-    GetClassName(handle, name, name.Capacity);
-    return name.ToString();
-}
-'@
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.IO.Compression.FileSystem
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # ---------- settings ----------
@@ -59,7 +30,7 @@ $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbe
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
 # updates: the newest release zip of the (public) GitHub repo; only the scripts change, the .exe launcher never does
 # raise on every change that should reach the others: the Update button only offers a higher version, never a lower one
-$AppVersion = '2.2'
+$AppVersion = '2.3'
 $UpdateUrl = 'https://github.com/malekje/ClaudeCodeUsage/releases/latest/download/ClaudeUsage.zip'
 $UpdatedFiles = 'claude-usage.ps1', 'claude-usage-hook.ps1'
 $UpdateZipPath = Join-Path $env:TEMP 'ClaudeUsage-update.zip'
@@ -148,54 +119,6 @@ $StormCloudColor = '#6B6962'
 $SessionKey = 'five_hour'
 $SessionWindowHours = 5
 $MinForecastHours = 0.1      # too early to tell before that
-
-# a runaway: now and then somebody leaves the widget, visits an app on another screen and fools around on the taskbar
-$RunawayOdds = if ($Demo) { 200 } else { 3600 }   # chance per frame while somebody is free to go: about every 3 minutes
-$RunawayScale = 1.5           # a bit bigger outside than inside the small widget
-$RunawaySpeed = 9             # screen pixels per frame
-$RushSpeed = 24               # called back because Claude needs it
-$RunawayHopHeight = 10
-$RunawayLineRoom = 26         # room above the character for what it says
-$RunawayWindowWidth = 360     # room for what it says; the character stands in the middle
-$VisitTicks = 200             # 10 s on an app's title bar
-$TaskbarTicks = 160           # 8 s fooling around on the taskbar
-$MinVisitWidth = 300          # narrower windows are too small to stand on
-$VisitEdgeMargin = 60
-$TitleBarProbe = 10           # checks this far below its feet that no other window covers the spot
-$ClockMargin = 150            # the taskbar clock is about this far from the right end
-$ShellClasses = 'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd'   # the desktop and the taskbar are not apps
-$WidgetHosts = 'powershell', 'pwsh'   # with a WPF window (class HwndWrapper...) that is another copy of this widget
-$WpfWindowClass = 'HwndWrapper*'
-$SkipApps = 'ApplicationFrameHost', 'TextInputHost', 'ShellExperienceHost', 'SearchHost', 'StartMenuExperienceHost', 'LockApp'
-# Only the app's name is ever read, never a window title: titles can show private pages, mails or file names. {0} = the app's name.
-$AppLines = @(
-    @{ Apps = 'chrome', 'msedge', 'firefox', 'brave', 'opera'; Say = 'Ooh, {0}! What are you browsing?', '...I won''t tell.' }
-    @{ Apps = 'excel'; Say = 'Excel? So many little boxes.', 'I''d count them, but...' }
-    @{ Apps = 'winword'; Say = 'Writing something? Put me in it!', 'I''d be a great main character.' }
-    @{ Apps = 'powerpnt'; Say = 'Slides! Can I be on slide 1?', 'I''ll stand very still.' }
-    @{ Apps = 'code', 'devenv', 'rider64', 'idea64', 'pycharm64'; Say = 'Coding without me?!', 'I''m hurt.' }
-    @{ Apps = 'ms-teams', 'teams', 'zoom', 'slack', 'discord'; Say = 'Chatting with people?', 'Say hi from me!' }
-    @{ Apps = 'outlook', 'olk', 'thunderbird'; Say = 'So many emails...', 'Answer them later.' }
-    @{ Apps = 'explorer'; Say = 'Looking for a file?', 'It''s always in Downloads.' }
-    @{ Apps = 'spotify'; Say = 'What are we listening to?', 'Turn it up!' }
-    @{ Apps = 'claude'; Say = 'Hey, that''s where I come from!', 'Say hi to the others.' }
-    @{ Apps = 'windowsterminal', 'powershell', 'pwsh', 'cmd'; Say = 'A terminal! Very hacker.', 'Type faster!' }
-    @{ Apps = 'notepad'; Say = 'Notes? Am I in them?', 'I should be.' }
-)
-$UnknownAppLines = 'Ooh, {0}! What do you use it for?', 'Looks important.'
-$TaskbarLines = @{ Sit = 'Nice view from up here.'; Nap = 'Zzz...' }
-$ClockQuips = @(
-    @{ Hours = 11..13; Say = 'lunch?' }
-    @{ Hours = 16..18; Say = 'home time soon?' }
-    @{ Hours = @(22, 23) + 0..5; Say = 'shouldn''t you be asleep?' }
-)
-$DefaultClockQuip = 'time flies.'
-$RunawayLines = @{ Leave = 'Brb!'; Gone = 'Hey, where did it go?'; Work = 'Coming!' }
-$ExtendedStyleIndex = -20     # GWL_EXSTYLE
-$ClickThroughStyles = 0x20 -bor 0x80 -bor 0x08000000   # transparent to clicks, no Alt+Tab entry, never takes focus
-$TopmostWindow = [IntPtr]-1
-$MoveOnlyFlags = 0x0001 -bor 0x0010   # keep the size, do not activate
-$RootAncestor = 2             # GA_ROOT: the app window a point belongs to
 
 # a failed command: the others come and look
 $GatherTicks = 120
@@ -1248,7 +1171,7 @@ function New-Character($member, $startX) {
     foreach ($part in @($frames) + $eyes, $lids, $mouth, $sweat, $hat, $overhead, $nameTag) { $view.Children.Add($part) | Out-Null }
     $stage.Children.Add($view) | Out-Null
     [pscustomobject]@{
-        Name = $member.Name; Color = $member.Color; Escaped = $false; View = $view; Frames = $frames; Eyes = $eyes; Lids = $lids; Mouth = $mouth; Sweat = $sweat
+        Name = $member.Name; Color = $member.Color; View = $view; Frames = $frames; Eyes = $eyes; Lids = $lids; Mouth = $mouth; Sweat = $sweat
         Hat = $hat; HomeSide = $member.HomeSide; Overhead = $overhead; Breath = $breath; PixelSize = $size; Width = $width; Top = $GroundY - $height
         X = $startX; Speed = $member.Speed; Direction = (1, -1)[$random.Next(2)]; Talking = $false; Walking = $false
         PauseTicks = 0; BlinkCountdown = $random.Next(20, 120); HopTick = 0
@@ -1333,7 +1256,7 @@ function Get-Role($character) {
 # True when moving to $newX would walk into another character (they bump and turn around instead of overlapping).
 function Test-Bump($character, $newX) {
     foreach ($other in $characters) {
-        if ($other.Name -eq $character.Name -or $other.Escaped) { continue }
+        if ($other.Name -eq $character.Name) { continue }
         $currentDistance = [math]::Abs((Get-Center $character) - (Get-Center $other))
         $newDistance = [math]::Abs($newX + $character.Width / 2 - (Get-Center $other))
         $touching = $newDistance -lt ($character.Width + $other.Width) / 2 + $PersonalSpace
@@ -1446,7 +1369,6 @@ function Move-Guest($guest) {
 
 # Returns whether the character walked this tick.
 function Move-Character($character) {
-    if ($character.Escaped) { return $false }   # out on a trip, see Update-Runaway
     if (Test-Held $character) { return $true }   # dangling from the mouse, legs kicking
     if ($character.Altitude -gt 0 -or $character.FallSpeed -ne 0) { Step-Fall $character; return $false }
     if ($character.Talking) { return $false }
@@ -1617,7 +1539,7 @@ function Set-TalkPhase($talk, $phase, $ticks) {
 # A line may name its Speaker and Listener; otherwise somebody free says it to whoever is nearest.
 function Start-Conversation($line, $shout) {
     # whoever is busy with Claude's task does not chat
-    $free = @($characters | Where-Object { (Get-Role $_) -notin 'work', 'pace', 'call' -and -not $_.Escaped })
+    $free = @($characters | Where-Object { (Get-Role $_) -notin 'work', 'pace', 'call' })
     if ($free.Count -lt 2) { return }
     $speaker = $free | Where-Object { $_.Name -eq $line.Speaker } | Select-Object -First 1
     if (-not $speaker) { $speaker = Get-RandomItem $free }
@@ -1672,256 +1594,6 @@ function Step-Conversation {
     }
 }
 
-# ---------- runaway: now and then somebody leaves the widget, visits an app on another screen and fools around on the taskbar ----------
-# Everything outside the widget is in screen pixels (this process is per-monitor DPI aware), so windows and screens all agree.
-# A trip is a list of steps: walk to a spot, or stay a while (sitting, napping or standing, maybe on an app's title bar).
-
-function Get-WindowBox($handle) {
-    $box = New-Object ClaudeUsage.Win+RECT
-    [ClaudeUsage.Win]::GetWindowRect($handle, [ref]$box) | Out-Null
-    $box
-}
-
-# A see-through, click-through little window with just the character in it (and room above for what it says).
-function New-RunawayWindow($character) {
-    $size = $character.PixelSize * $RunawayScale
-    $bodyWidth = $BodyRows[0].Length * $size
-    $bodyHeight = ($BodyRows.Count + 1) * $size
-    $height = $RunawayLineRoom + $bodyHeight
-    $runawayWindow = [Windows.Markup.XamlReader]::Parse(@"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
-        Topmost="True" ShowInTaskbar="False" ShowActivated="False" ResizeMode="NoResize" Left="-32000" Top="-32000" Width="$RunawayWindowWidth" Height="$height">
-  <Grid>
-    <Border Name="Line" Background="#F5F4EE" CornerRadius="8" Padding="6,1,6,1" HorizontalAlignment="Center" VerticalAlignment="Top" Visibility="Hidden">
-      <TextBlock Name="LineText" FontSize="13" FontFamily="Segoe UI" Foreground="#262624" TextTrimming="CharacterEllipsis"/>
-    </Border>
-    <Canvas Name="Body" Width="$bodyWidth" Height="$bodyHeight" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
-  </Grid>
-</Window>
-"@)
-    $body = $runawayWindow.FindName('Body')
-    $frames = foreach ($pixelRows in $FrameRows) { New-Frame $pixelRows $size $character.Color }
-    $eyes = New-Frame $EyeRows $size $character.Color
-    foreach ($part in @($frames) + $eyes) { $body.Children.Add($part) | Out-Null }
-    $runawayWindow.Show()
-    $handle = (New-Object Windows.Interop.WindowInteropHelper $runawayWindow).Handle
-    $style = [ClaudeUsage.Win]::GetWindowLong($handle, $ExtendedStyleIndex)
-    [ClaudeUsage.Win]::SetWindowLong($handle, $ExtendedStyleIndex, $style -bor $ClickThroughStyles) | Out-Null
-    @{ Window = $runawayWindow; Handle = $handle; Frames = $frames; Eyes = $eyes; PixelSize = $size
-       Line = $runawayWindow.FindName('Line'); LineText = $runawayWindow.FindName('LineText') }
-}
-
-function Show-RunawayLine($runaway, $text) {
-    if (-not $text) { return }
-    $runaway.LineText.Text = $text
-    $runaway.Line.Visibility = 'Visible'
-    $runaway.LineTicks = $BubbleTicks
-}
-
-# Moves the feet one step towards a point. Returns $true once there.
-function Move-Runaway($runaway, $targetX, $targetY, $speed) {
-    $dx = $targetX - $runaway.FeetX
-    $dy = $targetY - $runaway.FeetY
-    $distance = [math]::Sqrt($dx * $dx + $dy * $dy)
-    if ($distance -le $speed) { $runaway.FeetX = $targetX; $runaway.FeetY = $targetY; return $true }
-    $runaway.FeetX += $dx * $speed / $distance
-    $runaway.FeetY += $dy * $speed / $distance
-    $false
-}
-
-function Get-HomeSpot($character) { $stage.PointToScreen([Windows.Point]::new((Get-Center $character), $GroundY)) }
-
-# The app's name (from its program file) and process name. Never the window title.
-function Get-AppName($handle) {
-    $processId = [uint32]0
-    [ClaudeUsage.Win]::GetWindowThreadProcessId($handle, [ref]$processId) | Out-Null
-    if ($processId -eq $PID) { return }   # this widget and its runaways
-    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-    if (-not $process -or $process.ProcessName -in $SkipApps) { return }
-    # an app running as admin hides its program file from a normal user: then the process name has to do
-    $description = try { $process.MainModule.FileVersionInfo.FileDescription } catch { $null }
-    @{ Process = $process.ProcessName; Name = if ($description) { $description } else { $process.ProcessName } }
-}
-
-function Get-AppLines($app) {
-    $known = $AppLines | Where-Object { $app.Process -in $_.Apps } | Select-Object -First 1
-    $lines = if ($known) { $known.Say } else { $UnknownAppLines }
-    foreach ($line in $lines) { $line -f $app.Name }
-}
-
-# $true when that point shows this window, not another one in front of it.
-function Test-OnTop($handle, $x, $y) {
-    $point = New-Object ClaudeUsage.Win+POINT
-    $point.X = [int]$x
-    $point.Y = [int]$y
-    [ClaudeUsage.Win]::GetAncestor([ClaudeUsage.Win]::WindowFromPoint($point), $RootAncestor) -eq $handle
-}
-
-# On the top edge; a maximized window has no top edge on the screen, so it stands inside the title bar instead.
-function Set-VisitFeet($visit, $box) {
-    $visit.X = $box.Left + $visit.OffsetX
-    $visit.Y = [math]::Max($box.Top, $visit.MinY)
-}
-
-# Where to stand on this window, or nothing when it is not an app the human can see on that screen.
-function Get-VisitSpot($handle, $screen, $headroom) {
-    if (-not [ClaudeUsage.Win]::IsWindowVisible($handle) -or [ClaudeUsage.Win]::IsIconic($handle)) { return }
-    if ([ClaudeUsage.Win]::GetWindowTextLength($handle) -eq 0) { return }   # untitled: a helper window, not an app (only the length is read)
-    $class = [ClaudeUsage.Win]::GetClass($handle)
-    if ($class -in $ShellClasses) { return }
-    if ([Windows.Forms.Screen]::FromHandle($handle).DeviceName -ne $screen.DeviceName) { return }
-    $box = Get-WindowBox $handle
-    if ($box.Right - $box.Left -lt $MinVisitWidth) { return }
-    $visit = @{ Window = $handle; OffsetX = Get-RandomBetween $VisitEdgeMargin ($box.Right - $box.Left - $VisitEdgeMargin); MinY = $screen.Bounds.Top + $headroom }
-    Set-VisitFeet $visit $box
-    if (-not (Test-OnTop $handle $visit.X ($visit.Y + $TitleBarProbe))) { return }
-    $visit.App = Get-AppName $handle
-    if (-not $visit.App -or ($visit.App.Process -in $WidgetHosts -and $class -like $WpfWindowClass)) { return }
-    $visit
-}
-
-function Find-Visit($screen, $headroom) {
-    $visits = @(foreach ($handle in [ClaudeUsage.Win]::GetTopWindows()) { Get-VisitSpot $handle $screen $headroom })
-    if ($visits.Count -gt 0) { Get-RandomItem $visits }
-}
-
-function Get-ClockLine {
-    $now = Get-Date
-    $quip = ($ClockQuips | Where-Object { $now.Hour -in $_.Hours } | Select-Object -First 1).Say
-    if (-not $quip) { $quip = $DefaultClockQuip }
-    "It's {0:HH:mm}... {1}" -f $now, $quip
-}
-
-# Walks to a spot on the taskbar, then stands by the clock, naps or sits there.
-function Get-TaskbarSteps($screen) {
-    $area = $screen.WorkingArea
-    $spotX = Get-RandomBetween ($area.Left + $VisitEdgeMargin) ($area.Right - $VisitEdgeMargin)
-    switch ($random.Next(3)) {
-        0 { @{ X = $area.Right - $ClockMargin; Y = $area.Bottom }; @{ Ticks = $TaskbarTicks; Pose = 'stand'; Clock = $true } }
-        1 { @{ X = $spotX; Y = $area.Bottom }; @{ Ticks = $TaskbarTicks; Pose = 'nap'; Line = $TaskbarLines.Nap } }
-        2 { @{ X = $spotX; Y = $area.Bottom }; @{ Ticks = $TaskbarTicks; Pose = 'sit'; Line = $TaskbarLines.Sit } }
-    }
-}
-
-# Down onto the taskbar, along it to another screen (when there is one), up onto an app there, back down, fooling around, home.
-function Get-TripSteps($runaway, $start) {
-    $here = [Windows.Forms.Screen]::FromPoint([Drawing.Point]::new([int]$start.X, [int]$start.Y))
-    $others = @([Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -ne $here.DeviceName })
-    $there = if ($others.Count -gt 0) { Get-RandomItem $others } else { $here }
-    $floor = $there.WorkingArea.Bottom
-    @{ X = $start.X; Y = $here.WorkingArea.Bottom }
-    $box = Get-WindowBox $runaway.Handle
-    $visit = Find-Visit $there ($box.Bottom - $box.Top)
-    if ($visit) {
-        $lines = @(Get-AppLines $visit.App)
-        $visit.Ticks = $VisitTicks
-        $visit.Pose = 'sit'
-        $visit.Line = $lines[0]
-        $visit.Then = $lines[1]
-        @{ X = $visit.X; Y = $floor }
-        @{ X = $visit.X; Y = $visit.Y }
-        $visit
-        @{ Down = $true; Y = $floor }
-    }
-    Get-TaskbarSteps $there
-    @{ X = $start.X; Y = $here.WorkingArea.Bottom }
-    @{ Home = $true; Speed = $RunawaySpeed }
-}
-
-function Start-Runaway($character) {
-    $runaway = New-RunawayWindow $character
-    $runaway.Character = $character
-    $start = Get-HomeSpot $character
-    $runaway.FeetX = $start.X
-    $runaway.FeetY = $start.Y
-    $runaway.LineTicks = 0
-    $runaway.Steps = New-Object Collections.Generic.List[object]
-    foreach ($step in (Get-TripSteps $runaway $start)) { $runaway.Steps.Add($step) }
-    Show-RunawayLine $runaway $RunawayLines.Leave
-    $character.Escaped = $true
-    $character.View.Visibility = 'Hidden'
-    $script:runaway = $runaway
-}
-
-function Stop-Runaway {
-    $runaway = $script:runaway
-    if (-not $runaway) { return }
-    $script:runaway = $null
-    $runaway.Window.Close()
-    $runaway.Character.Escaped = $false
-    $runaway.Character.View.Visibility = 'Visible'
-}
-
-# The last step is always going home, which ends the trip, so there is always a next one.
-function Start-NextStep($runaway) {
-    $runaway.Steps.RemoveAt(0)
-    $next = $runaway.Steps[0]
-    if ($next.Down) { $next.X = $runaway.FeetX }   # straight down from wherever the window took it
-    $line = if ($next.Clock) { Get-ClockLine } else { $next.Line }
-    Show-RunawayLine $runaway $line
-}
-
-function Send-RunawayHome($runaway) {
-    $runaway.Steps.Clear()
-    $runaway.Steps.Add(@{ Home = $true; Speed = $RushSpeed })
-    Show-RunawayLine $runaway $RunawayLines.Work
-}
-
-# Stays on the window while it moves; $false once it is closed or minimized.
-function Test-StillOpen($runaway, $visit) {
-    if (-not [ClaudeUsage.Win]::IsWindowVisible($visit.Window) -or [ClaudeUsage.Win]::IsIconic($visit.Window)) { return $false }
-    Set-VisitFeet $visit (Get-WindowBox $visit.Window)
-    $runaway.FeetX = $visit.X
-    $runaway.FeetY = $visit.Y
-    $true
-}
-
-# Only somebody who is just wandering around (not the one doing Claude's task, not a chatter).
-function Test-RunawayChance {
-    if ($script:held -or $script:partyTicksLeft -gt 0 -or $script:mood -in 'asleep', 'exhausted') { return }
-    if ($random.Next($RunawayOdds) -ne 0) { return }
-    $ready = @($characters | Where-Object { $_.Altitude -eq 0 -and -not $_.Sleeping -and -not $_.Talking -and (Get-Role $_) -eq 'roam' })
-    if ($ready.Count -gt 0) { Start-Runaway (Get-RandomItem $ready) }
-}
-
-# One frame of the current step. Returns $true while it walks.
-function Step-Runaway($runaway) {
-    $step = $runaway.Steps[0]
-    if ($step.Home) {
-        $homeSpot = Get-HomeSpot $runaway.Character
-        if (Move-Runaway $runaway $homeSpot.X $homeSpot.Y $step.Speed) { Stop-Runaway }
-        return $true
-    }
-    if (-not $step.ContainsKey('Ticks')) {
-        if (Move-Runaway $runaway $step.X $step.Y $RunawaySpeed) { Start-NextStep $runaway }
-        return $true
-    }
-    if ($step.Window -and -not (Test-StillOpen $runaway $step)) { Start-NextStep $runaway; Show-RunawayLine $runaway $RunawayLines.Gone; return $false }
-    $step.Ticks--
-    if ($step.Then -and $step.Ticks -eq [int]($VisitTicks / 2)) { Show-RunawayLine $runaway $step.Then }
-    if ($step.Ticks -le 0) { Start-NextStep $runaway }
-    $false
-}
-
-function Update-Runaway {
-    $runaway = $script:runaway
-    if (-not $runaway) { Test-RunawayChance; return }
-    if ($runaway.LineTicks -gt 0) { $runaway.LineTicks--; if ($runaway.LineTicks -eq 0) { $runaway.Line.Visibility = 'Hidden' } }
-    if ((Get-Role $runaway.Character) -ne 'roam' -and -not $runaway.Steps[0].Home) { Send-RunawayHome $runaway }   # Claude needs this one
-    $moving = Step-Runaway $runaway
-    if (-not $script:runaway) { return }   # just got home
-    $pose = if ($moving) { 'walk' } else { $runaway.Steps[0].Pose }
-    $sitting = $pose -in 'sit', 'nap'
-    $frameIndex = if ($sitting) { 2 } elseif ($moving) { [int][math]::Floor($script:tick / 3) % 2 } else { 0 }
-    for ($i = 0; $i -lt $runaway.Frames.Count; $i++) { $runaway.Frames[$i].Visibility = Get-Visibility ($i -eq $frameIndex) }
-    $runaway.Eyes.Visibility = Get-Visibility ($pose -ne 'nap')
-    [Windows.Controls.Canvas]::SetTop($runaway.Eyes, [int]$sitting * $runaway.PixelSize)   # the sitting frame is one pixel lower
-    $lift = if ($moving) { $RunawayHopHeight * [math]::Abs([math]::Sin($script:tick / 3)) } else { 0 }   # little hops
-    $box = Get-WindowBox $runaway.Handle
-    $left = [int]($runaway.FeetX - ($box.Right - $box.Left) / 2)
-    $top = [int]($runaway.FeetY - ($box.Bottom - $box.Top) - $lift)
-    [ClaudeUsage.Win]::SetWindowPos($runaway.Handle, $TopmostWindow, $left, $top, 0, 0, $MoveOnlyFlags) | Out-Null
-}
 # ---------- wiring ----------
 
 $script:previousPercent = @{}
@@ -1955,7 +1627,6 @@ $script:renewStarted = $null
 $script:autoRenewTried = $false
 $script:loginOpened = $false
 $script:held = $null           # what the mouse is carrying: a character or the ball
-$script:runaway = $null        # the one out on a trip around the screens
 $script:todayChanged = $false
 Restore-Today
 # only events from now on: whatever happened before the widget opened is old news
@@ -2106,7 +1777,7 @@ Restore-Placement
 $script:placementChanged = $false
 $window.Add_SizeChanged({ $script:placementChanged = $true })
 $window.Add_LocationChanged({ $script:placementChanged = $true })
-$window.Add_Closing({ Stop-Runaway; Save-Placement; Save-Today })
+$window.Add_Closing({ Save-Placement; Save-Today })
 
 $usageTimer = New-Object Windows.Threading.DispatcherTimer
 $usageTimer.Interval = [TimeSpan]::FromSeconds($RefreshSeconds)
@@ -2119,14 +1790,13 @@ $animationTimer.Interval = [TimeSpan]::FromMilliseconds($AnimationMilliseconds)
 $animationTimer.Add_Tick({
     # an error in one frame must not close an always-on widget: show it in the status line and keep going
     try {
-        if ($window.WindowState -eq 'Minimized') { Stop-Runaway; return }   # nobody is watching: do not spend CPU animating
+        if ($window.WindowState -eq 'Minimized') { return }   # nobody is watching: do not spend CPU animating
         $script:tick++
         if ($script:tick % $EventPollTicks -eq 0) { Read-HookEvents }
         if ($script:tick % 20 -eq 0) { Reset-StaleActivity; Update-Mood; Update-Sign }
         if ($script:celebrateTicksLeft -gt 0) { $script:celebrateTicksLeft-- }
         if ($script:gatherTicksLeft -gt 0) { $script:gatherTicksLeft-- }
         Step-Hold
-        Update-Runaway
         $legPeriod = if ($script:mood -eq 'panic' -or $script:partyTicksLeft -gt 0) { 2 } else { 4 }
         $legFrame = [int][math]::Floor($script:tick / $legPeriod) % 2
         foreach ($character in $characters) { $character.Walking = Move-Character $character }

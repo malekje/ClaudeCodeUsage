@@ -1,6 +1,6 @@
 # Claude Code Usage
 
-A small always-on-top Windows widget that shows your live Claude plan usage (session and weekly limits)
+A small Windows widget that shows your live Claude plan usage (session and weekly limits)
 with animated pixel characters (Opus, Sonnet, Haiku) that react to your usage and to what Claude Code is doing.
 
 ## Install (Windows)

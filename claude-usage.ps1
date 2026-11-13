@@ -1,4 +1,4 @@
-# Claude usage widget - always-on-top window showing plan usage, with little Claudes living underneath.
+# Claude usage widget - window showing plan usage, with little Claudes living underneath.
 # Run:   powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File claude-usage.ps1   (or the "Claude Usage" desktop shortcut)
 # Demo:  add -Demo to play a fast fake scenario (usage climbing, reset, boredom, bedtime, wake-up) without touching your login.
 # Drag anywhere to move, drag the bottom-right corner to resize, - minimizes, x closes. Click a character to poke it.
@@ -30,7 +30,7 @@ $LastUsagePath = Join-Path $AppFolder 'claude-usage.last.json'      # last numbe
 $UsageUrl = 'https://api.anthropic.com/api/oauth/usage'   # undocumented endpoint, may change
 # updates: the newest release zip of the (public) GitHub repo; only the scripts change, the .exe launcher never does
 # raise on every change that should reach the others: the Update button only offers a higher version, never a lower one
-$AppVersion = '2.3'
+$AppVersion = '2.4'
 $UpdateUrl = 'https://github.com/malekje/ClaudeCodeUsage/releases/latest/download/ClaudeUsage.zip'
 $UpdatedFiles = 'claude-usage.ps1', 'claude-usage-hook.ps1'
 $UpdateZipPath = Join-Path $env:TEMP 'ClaudeUsage-update.zip'
@@ -281,7 +281,7 @@ $AttentionNotifications = 'permission_prompt', 'elicitation_dialog'
 $window = [Windows.Markup.XamlReader]::Parse(@'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         Title="Claude usage" Width="720" Height="490" MinWidth="320" MinHeight="220" WindowStyle="None"
-        AllowsTransparency="True" Background="Transparent" Topmost="True" ResizeMode="CanResizeWithGrip"
+        AllowsTransparency="True" Background="Transparent" ResizeMode="CanResizeWithGrip"
         FontFamily="Segoe UI">
   <Border Background="#262624" BorderBrush="#3D3C38" BorderThickness="1" CornerRadius="14" Padding="20,14,20,16">
     <Viewbox>
